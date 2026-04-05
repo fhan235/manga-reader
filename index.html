@@ -417,6 +417,38 @@ html, body {
   max-width: 50%;
 }
 
+/* ========== 双页模式（翻页式双栏） ========== */
+.reader-viewport.mode-double-page {
+  overflow: hidden;
+}
+
+.reader-viewport.mode-double-page .page-container {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--double-gap-h);
+  padding: 0 8px;
+}
+
+.reader-viewport.mode-double-page .page-wrapper {
+  max-width: 50%;
+  max-height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background: transparent;
+}
+
+.reader-viewport.mode-double-page .page-wrapper img {
+  max-width: 100%;
+  max-height: calc(100vh - 56px);
+  object-fit: contain;
+  display: block;
+}
+
 /* 图片懒加载占位 */
 .page-wrapper {
   background: var(--bg-secondary);
@@ -1083,11 +1115,12 @@ html, body {
     </div>
     <div class="chapter-list" id="chapterList"></div>
     <div class="shortcuts-hint">
-      <kbd>←</kbd> 上一章 &nbsp; <kbd>→</kbd> 下一章 &nbsp;
-      <kbd>Space</kbd> 向下滚动<br>
-      <kbd>S</kbd> 侧栏 &nbsp; <kbd>T</kbd> 回顶部 &nbsp;
-      <kbd>F</kbd> 全屏 &nbsp; <kbd>M</kbd> 切换模式<br>
-      <kbd>O</kbd> 打开文件夹 &nbsp; <kbd>H</kbd> 返回书架
+      <kbd>←</kbd><kbd>→</kbd> 翻页 &nbsp;
+      <kbd>[</kbd> 上一章 &nbsp; <kbd>]</kbd> 下一章<br>
+      <kbd>Space</kbd> 向下翻 &nbsp;
+      <kbd>S</kbd> 侧栏 &nbsp; <kbd>T</kbd> 回顶部<br>
+      <kbd>F</kbd> 全屏 &nbsp; <kbd>M</kbd> 切换模式 &nbsp;
+      <kbd>H</kbd> 返回书架
     </div>
   </aside>
 
@@ -1098,15 +1131,16 @@ html, body {
       <button class="btn" id="btnBackHome" title="返回书架 (H)" style="display:none">🏠 书架</button>
       <button class="btn accent" id="btnOpenFolder" title="打开文件夹 (O)">📂 文件夹</button>
       <button class="btn" id="btnOpenFile" title="打开压缩包">📦 文件</button>
-      <button class="btn" id="btnPrevChapter" title="上一章 (←)" disabled>◀ 上一章</button>
+      <button class="btn" id="btnPrevChapter" title="上一章 ([)" disabled>◀ 上一章</button>
       <span class="chapter-nav-title" id="currentChapterTitle">选择章节开始阅读</span>
-      <button class="btn" id="btnNextChapter" title="下一章 (→)" disabled>下一章 ▶</button>
+      <button class="btn" id="btnNextChapter" title="下一章 (])" disabled>下一章 ▶</button>
       <span class="page-indicator" id="pageIndicator"></span>
       <select class="mode-select" id="modeSelect" title="阅读模式 (M)">
         <option value="scroll">📖 条漫</option>
         <option value="single">📄 单页</option>
         <option value="fit-width">↔ 适宽</option>
         <option value="double">▥ 双栏</option>
+        <option value="double-page">📑 双页</option>
       </select>
       <div class="gap-control" id="gapControlH">
         <span class="gap-label">左右</span>
@@ -1148,6 +1182,7 @@ const state = {
   currentPage: 0,
   readingMode: 'scroll',
   singlePageIndex: 0,
+  doublePageIndex: 0,  // 双页模式当前起始页索引
   sidebarCollapsed: false,
   searchQuery: '',
 };
@@ -1505,6 +1540,7 @@ function loadChapter(index, startPage) {
 
   state.currentChapter = index;
   state.singlePageIndex = startPage || 0;
+  state.doublePageIndex = startPage || 0;
   state.currentPage = startPage || 0;
   const chapter = state.manga.chapters[index];
 
@@ -1533,6 +1569,8 @@ function renderImages(chapter) {
     renderSinglePage(chapter);
   } else if (state.readingMode === 'double') {
     renderDoubleMode(chapter);
+  } else if (state.readingMode === 'double-page') {
+    renderDoublePageMode(chapter);
   } else {
     renderScrollMode(chapter);
   }
@@ -1726,6 +1764,95 @@ function navigateSinglePage(dir) {
   renderImages(chapter);
 }
 
+// ==================== 双页模式（翻页式） ====================
+function renderDoublePageMode(chapter) {
+  const container = document.createElement('div');
+  container.className = 'page-container';
+
+  const idx = state.doublePageIndex;
+
+  // 左页
+  if (idx < chapter.images.length) {
+    const left = createPageWrapperImmediate(chapter, idx);
+    container.appendChild(left);
+  }
+
+  // 右页
+  if (idx + 1 < chapter.images.length) {
+    const right = createPageWrapperImmediate(chapter, idx + 1);
+    container.appendChild(right);
+  }
+
+  el.readerViewport.appendChild(container);
+
+  // 更新页码指示器
+  const endPage = Math.min(idx + 2, chapter.images.length);
+  el.pageIndicator.textContent = `${idx + 1}-${endPage} / ${chapter.images.length}`;
+
+  // 点击区域翻页
+  el.readerViewport.onclick = (e) => {
+    const rect = el.readerViewport.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    if (x < rect.width / 3) navigateDoublePage(-1);
+    else if (x > rect.width * 2 / 3) navigateDoublePage(1);
+  };
+}
+
+// 创建立即加载（非懒加载）的 page wrapper
+function createPageWrapperImmediate(chapter, pageIndex) {
+  const imgName = chapter.images[pageIndex];
+  const wrapper = document.createElement('div');
+  wrapper.className = 'page-wrapper';
+  wrapper.dataset.index = pageIndex;
+
+  const img = document.createElement('img');
+  const imgPath = chapter.path
+    ? `${encodeURIComponent(chapter.path)}/${encodeURIComponent(imgName)}`
+    : encodeURIComponent(imgName);
+  img.src = `/images/${imgPath}`;
+  img.alt = `第 ${pageIndex + 1} 页`;
+  img.addEventListener('load', () => wrapper.classList.add('loaded'));
+  img.addEventListener('error', () => {
+    wrapper.innerHTML = `<div style="padding:40px;text-align:center;color:var(--text-muted)">⚠️ 图片加载失败<br><small>${imgName}</small></div>`;
+  });
+
+  wrapper.appendChild(img);
+  return wrapper;
+}
+
+function navigateDoublePage(dir) {
+  if (!state.manga) return;
+  const chapter = state.manga.chapters[state.currentChapter];
+  const step = 2;
+  const newIdx = state.doublePageIndex + dir * step;
+
+  if (newIdx < 0) {
+    // 翻到上一章最后一对
+    if (state.currentChapter > 0) {
+      const prevChapter = state.manga.chapters[state.currentChapter - 1];
+      const lastPageIdx = Math.max(0, prevChapter.images.length - 2);
+      // 确保是偶数起始
+      const startIdx = lastPageIdx - (lastPageIdx % 2);
+      state.doublePageIndex = startIdx;
+      loadChapter(state.currentChapter - 1, startIdx);
+    }
+    return;
+  }
+  if (newIdx >= chapter.images.length) {
+    // 翻到下一章
+    if (state.currentChapter < state.manga.chapters.length - 1) {
+      state.doublePageIndex = 0;
+      loadChapter(state.currentChapter + 1);
+    }
+    return;
+  }
+
+  state.doublePageIndex = newIdx;
+  state.currentPage = newIdx;
+  saveProgressToServer();
+  renderImages(chapter);
+}
+
 function updatePageIndicator(chapter) {
   el.pageIndicator.textContent = `${state.singlePageIndex + 1} / ${chapter.images.length}`;
 }
@@ -1817,16 +1944,16 @@ function setReadingMode(mode) {
   state.readingMode = mode;
   el.modeSelect.value = mode;
   el.readerViewport.className = `reader-viewport mode-${mode}`;
-  if (mode !== 'single') el.readerViewport.onclick = null;
-  // 双栏模式下显示间距控制
-  const isDouble = mode === 'double';
-  el.gapControlH.classList.toggle('visible', isDouble);
-  el.gapControlV.classList.toggle('visible', isDouble);
+  if (mode !== 'single' && mode !== 'double-page') el.readerViewport.onclick = null;
+  // 双栏/双页模式下显示间距控制
+  const showGap = mode === 'double' || mode === 'double-page';
+  el.gapControlH.classList.toggle('visible', showGap);
+  el.gapControlV.classList.toggle('visible', showGap);
   if (state.currentChapter >= 0 && state.manga) renderImages(state.manga.chapters[state.currentChapter]);
 }
 
 function cycleReadingMode() {
-  const modes = ['scroll', 'single', 'fit-width', 'double'];
+  const modes = ['scroll', 'single', 'fit-width', 'double', 'double-page'];
   const currentIdx = modes.indexOf(state.readingMode);
   setReadingMode(modes[(currentIdx + 1) % modes.length]);
 }
@@ -1839,16 +1966,45 @@ document.addEventListener('keydown', (e) => {
     case 'ArrowLeft':
       e.preventDefault();
       if (state.readingMode === 'single') navigateSinglePage(-1);
-      else loadChapter(state.currentChapter - 1);
+      else if (state.readingMode === 'double-page') navigateDoublePage(-1);
+      else {
+        // 条漫/适宽/双栏模式：向上翻一页高度
+        el.readerViewport.scrollBy({ top: -el.readerViewport.clientHeight * 0.85, behavior: 'smooth' });
+      }
       break;
     case 'ArrowRight':
       e.preventDefault();
       if (state.readingMode === 'single') navigateSinglePage(1);
-      else loadChapter(state.currentChapter + 1);
+      else if (state.readingMode === 'double-page') navigateDoublePage(1);
+      else {
+        // 条漫/适宽/双栏模式：向下翻一页高度
+        el.readerViewport.scrollBy({ top: el.readerViewport.clientHeight * 0.85, behavior: 'smooth' });
+      }
+      break;
+    case 'ArrowUp':
+      e.preventDefault();
+      if (state.readingMode === 'double-page') navigateDoublePage(-1);
+      else el.readerViewport.scrollBy({ top: -200, behavior: 'smooth' });
+      break;
+    case 'ArrowDown':
+      e.preventDefault();
+      if (state.readingMode === 'double-page') navigateDoublePage(1);
+      else el.readerViewport.scrollBy({ top: 200, behavior: 'smooth' });
+      break;
+    case '[': case '【':
+      // 上一章
+      e.preventDefault();
+      loadChapter(state.currentChapter - 1);
+      break;
+    case ']': case '】':
+      // 下一章
+      e.preventDefault();
+      loadChapter(state.currentChapter + 1);
       break;
     case ' ':
       e.preventDefault();
-      el.readerViewport.scrollBy({ top: el.readerViewport.clientHeight * 0.85, behavior: 'smooth' });
+      if (state.readingMode === 'double-page') navigateDoublePage(1);
+      else el.readerViewport.scrollBy({ top: el.readerViewport.clientHeight * 0.85, behavior: 'smooth' });
       break;
     case 's': case 'S': toggleSidebar(); break;
     case 't': case 'T': el.readerViewport.scrollTo({ top: 0, behavior: 'smooth' }); break;
@@ -1856,14 +2012,6 @@ document.addEventListener('keydown', (e) => {
     case 'm': case 'M': cycleReadingMode(); break;
     case 'o': case 'O': pickFolder(); break;
     case 'h': case 'H': goBackHome(); break;
-    case 'ArrowUp':
-      e.preventDefault();
-      el.readerViewport.scrollBy({ top: -200, behavior: 'smooth' });
-      break;
-    case 'ArrowDown':
-      e.preventDefault();
-      el.readerViewport.scrollBy({ top: 200, behavior: 'smooth' });
-      break;
   }
 });
 
