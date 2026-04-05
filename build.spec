@@ -68,7 +68,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='漫画阅读器.app',
-    icon=os.path.join(base_dir, 'icon.icns'),  # 自定义图标
+    icon=os.path.join(base_dir, 'img.icns'),  # 自定义图标
     bundle_identifier='com.mangareader.app',
     info_plist={
         'CFBundleName': '漫画阅读器',

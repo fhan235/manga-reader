@@ -698,9 +698,18 @@ class MangaHandler(SimpleHTTPRequestHandler):
     manga_data = None
     static_dir = None
     original_path = None  # 记录原始路径（压缩包时用）
+    # 映射：章节索引 → 解压后的临时目录
+    # 当文件夹里有压缩包时，压缩包解压到临时目录，
+    # 但 manga_root 是原始文件夹，需要这个映射来找到图片
+    _chapter_extracted_dirs = {}
 
     def log_message(self, format, *args):
+        # 静默大部分请求日志
         pass
+
+    def do_HEAD(self):
+        """HEAD 请求走同样的路由"""
+        self.do_GET()
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -826,6 +835,13 @@ class MangaHandler(SimpleHTTPRequestHandler):
         MangaHandler.manga_data = manga_data
         MangaHandler.original_path = manga_data.get('original_path', path)
 
+        # 构建解压目录映射：章节索引 → 解压后的临时目录
+        MangaHandler._chapter_extracted_dirs = {}
+        for idx, ch in enumerate(manga_data.get('chapters', [])):
+            extracted_dir = ch.get('_extracted_dir')
+            if extracted_dir:
+                MangaHandler._chapter_extracted_dirs[idx] = extracted_dir
+
         # 写入历史记录（存原始路径）
         history_path = manga_data.get('original_path', path)
         add_to_history(history_path, manga_data['manga_name'])
@@ -940,6 +956,7 @@ class MangaHandler(SimpleHTTPRequestHandler):
                 ch = self.manga_data['chapters'][0]
                 img_name = ch['images'][0]
                 img_path = ch['path']
+                # 先在 manga_root 下找
                 if img_path:
                     file_path = Path(self.manga_root) / img_path / img_name
                 else:
@@ -947,6 +964,13 @@ class MangaHandler(SimpleHTTPRequestHandler):
                 if file_path.is_file():
                     self._serve_file(file_path)
                     return
+                # 在解压目录中找
+                extracted_dir = self._chapter_extracted_dirs.get(0)
+                if extracted_dir:
+                    file_path = Path(extracted_dir) / img_name
+                    if file_path.is_file():
+                        self._serve_file(file_path)
+                        return
 
         # 否则尝试扫描并获取第一张图
         try:
@@ -955,12 +979,21 @@ class MangaHandler(SimpleHTTPRequestHandler):
                 self._serve_archive_cover(manga_path)
                 return
             elif os.path.isdir(manga_path):
+                # 先看目录里有没有压缩包，直接从压缩包提取封面更快
+                archive_files = [f for f in Path(manga_path).iterdir()
+                                if f.is_file() and f.suffix.lower() in ARCHIVE_EXTENSIONS]
+                if archive_files:
+                    archive_files.sort(key=lambda f: natural_sort_key(f.name))
+                    self._serve_archive_cover(str(archive_files[0]))
+                    return
+
                 data = scan_manga_folder(manga_path)
                 if data.get('chapters') and data['chapters'][0]['images']:
                     ch = data['chapters'][0]
                     img_name = ch['images'][0]
                     img_path = ch['path']
                     root = data['root_path']
+                    # 在 root 下找
                     if img_path:
                         file_path = Path(root) / img_path / img_name
                     else:
@@ -968,6 +1001,13 @@ class MangaHandler(SimpleHTTPRequestHandler):
                     if file_path.is_file():
                         self._serve_file(file_path)
                         return
+                    # 在解压目录中找
+                    extracted_dir = ch.get('_extracted_dir')
+                    if extracted_dir:
+                        file_path = Path(extracted_dir) / img_name
+                        if file_path.is_file():
+                            self._serve_file(file_path)
+                            return
         except Exception:
             pass
 
@@ -1036,13 +1076,38 @@ class MangaHandler(SimpleHTTPRequestHandler):
         file_path = Path(self.manga_root) / relative_path
 
         if not file_path.is_file():
-            self.send_error(404, f"Image not found: {relative_path}")
-            return
+            # 在 manga_root 下找不到，尝试在解压临时目录中查找
+            found = False
+            for ch_idx, extracted_dir in self._chapter_extracted_dirs.items():
+                alt_path = Path(extracted_dir) / relative_path
+                if alt_path.is_file():
+                    file_path = alt_path
+                    found = True
+                    break
 
-        # 安全检查
+            if not found:
+                self.send_error(404, f"Image not found: {relative_path}")
+                return
+
+        # 安全检查：文件必须在 manga_root 或某个解压目录下
+        resolved = file_path.resolve()
+        allowed = False
         try:
-            file_path.resolve().relative_to(Path(self.manga_root).resolve())
+            resolved.relative_to(Path(self.manga_root).resolve())
+            allowed = True
         except ValueError:
+            pass
+
+        if not allowed:
+            for ch_idx, extracted_dir in self._chapter_extracted_dirs.items():
+                try:
+                    resolved.relative_to(Path(extracted_dir).resolve())
+                    allowed = True
+                    break
+                except ValueError:
+                    pass
+
+        if not allowed:
             self.send_error(403, "Access denied")
             return
 
@@ -1122,6 +1187,13 @@ def main():
         MangaHandler.manga_root = manga_data['root_path']
         MangaHandler.manga_data = manga_data
         MangaHandler.original_path = manga_data.get('original_path', manga_path)
+
+        # 构建解压目录映射
+        MangaHandler._chapter_extracted_dirs = {}
+        for idx, ch in enumerate(manga_data.get('chapters', [])):
+            extracted_dir = ch.get('_extracted_dir')
+            if extracted_dir:
+                MangaHandler._chapter_extracted_dirs[idx] = extracted_dir
 
         # 写入历史记录
         history_path = manga_data.get('original_path', manga_path)
