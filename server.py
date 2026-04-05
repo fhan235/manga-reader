@@ -98,6 +98,8 @@ def extract_epub_images(epub_path, dest_dir):
     只支持图片型漫画 EPUB。
     """
     with zipfile.ZipFile(epub_path, 'r') as zf:
+        all_names = set(zf.namelist())
+
         # 1. 读 META-INF/container.xml 找到 OPF 文件路径
         try:
             container = zf.read('META-INF/container.xml').decode('utf-8')
@@ -125,13 +127,13 @@ def extract_epub_images(epub_path, dest_dir):
             return
 
         opf_root = ET.fromstring(opf_content)
-        # 处理命名空间
+        # 处理命名空间 — 兼容带命名空间和不带命名空间的 OPF
         opf_ns = {
             'opf': 'http://www.idpf.org/2007/opf',
             'dc': 'http://purl.org/dc/elements/1.1/'
         }
 
-        # 3. 从 manifest 提取所有图片项
+        # 3. 从 manifest 提取所有项
         manifest = {}
         for item in opf_root.findall('.//opf:manifest/opf:item', opf_ns):
             item_id = item.get('id', '')
@@ -139,70 +141,140 @@ def extract_epub_images(epub_path, dest_dir):
             media_type = item.get('media-type', '')
             manifest[item_id] = {'href': href, 'media_type': media_type}
 
-        # 4. 按 spine 顺序找到引用的图片
+        # fallback: 无命名空间的 manifest
+        if not manifest:
+            for item in opf_root.iter():
+                if item.tag.endswith('}item') or item.tag == 'item':
+                    item_id = item.get('id', '')
+                    href = item.get('href', '')
+                    media_type = item.get('media-type', '')
+                    if item_id and href:
+                        manifest[item_id] = {'href': href, 'media_type': media_type}
+
+        # 4. 按 spine 顺序找到引用的项
         spine_order = []
         for itemref in opf_root.findall('.//opf:spine/opf:itemref', opf_ns):
             idref = itemref.get('idref', '')
             if idref in manifest:
                 spine_order.append(manifest[idref])
 
+        # fallback: 无命名空间
+        if not spine_order:
+            for itemref in opf_root.iter():
+                if itemref.tag.endswith('}itemref') or itemref.tag == 'itemref':
+                    idref = itemref.get('idref', '')
+                    if idref in manifest:
+                        spine_order.append(manifest[idref])
+
+        # 辅助函数：将 EPUB 内部相对路径解析为 ZIP 路径
+        def resolve_epub_path(base_path, relative_path):
+            """解析 EPUB 内部的相对路径，返回 ZIP 中的实际路径"""
+            # 处理 URL 编码
+            relative_path = urllib.parse.unquote(relative_path)
+            # 拼接并规范化
+            if base_path:
+                combined = os.path.normpath(os.path.join(base_path, relative_path))
+            else:
+                combined = os.path.normpath(relative_path)
+            # 统一使用 POSIX 风格路径（ZIP 内部用 /）
+            combined = combined.replace('\\', '/')
+            # 去掉开头的 ./
+            if combined.startswith('./'):
+                combined = combined[2:]
+            return combined
+
         # 5. 提取图片文件
-        # 策略：先尝试从 spine 引用的 XHTML 中找图片，或直接找 manifest 中的图片
         image_items = []
 
         # 方式 A：直接是图片的 spine 项
         for item in spine_order:
             if item['media_type'].startswith('image/'):
-                image_items.append(item['href'])
+                href = item['href']
+                img_path = resolve_epub_path(opf_dir, href)
+                image_items.append(img_path)
 
         # 方式 B：spine 引用的是 XHTML，从中提取 img src
         if not image_items:
             for item in spine_order:
                 if 'html' in item['media_type'] or 'xml' in item['media_type']:
                     href = item['href']
-                    full_path = f"{opf_dir}/{href}" if opf_dir else href
+                    full_path = resolve_epub_path(opf_dir, href)
                     try:
                         html_content = zf.read(full_path).decode('utf-8')
-                        # 用正则找 img src 或 image xlink:href
-                        img_srcs = re.findall(r'(?:src|xlink:href)=["\']([^"\']+\.(jpe?g|png|gif|webp|bmp|tiff?|avif))["\']',
-                                             html_content, re.IGNORECASE)
+                        # 用正则找 img src 或 image xlink:href 或 SVG image href
+                        img_srcs = re.findall(
+                            r'(?:src|xlink:href|href)\s*=\s*["\']([^"\']+\.(jpe?g|png|gif|webp|bmp|tiff?|avif))["\']',
+                            html_content, re.IGNORECASE
+                        )
                         for src_match in img_srcs:
                             img_src = src_match[0]
-                            # 相对路径转换
-                            if not img_src.startswith('/'):
-                                html_dir = os.path.dirname(full_path)
-                                img_src = os.path.normpath(f"{html_dir}/{img_src}") if html_dir else img_src
-                            image_items.append(img_src)
-                    except Exception:
+                            # 相对路径基于 HTML 文件所在目录
+                            html_dir = os.path.dirname(full_path)
+                            img_path = resolve_epub_path(html_dir, img_src)
+                            image_items.append(img_path)
+                    except (KeyError, Exception) as e:
+                        print(f"  ⚠️ EPUB: 读取 {full_path} 失败: {e}")
                         continue
 
         # 方式 C：如果还是没找到，直接提取所有图片
         if not image_items:
-            for name in zf.namelist():
-                if is_image_file(name) and not name.startswith('__MACOSX'):
+            for name in all_names:
+                if is_image_file(name) and not name.startswith('__MACOSX') and not name.startswith('.'):
                     image_items.append(name)
             image_items.sort(key=natural_sort_key)
 
+        # 去重但保持顺序
+        seen = set()
+        unique_items = []
+        for item in image_items:
+            if item not in seen:
+                seen.add(item)
+                unique_items.append(item)
+        image_items = unique_items
+
         # 6. 提取图片到目标目录，按序号重命名保持顺序
         os.makedirs(dest_dir, exist_ok=True)
+        extracted_count = 0
         for idx, img_path in enumerate(image_items):
             try:
-                # 处理路径（EPUB 内部路径可能有 ../ 等）
+                # 尝试多种路径匹配方式
                 img_path_clean = img_path.replace('\\', '/')
                 if img_path_clean.startswith('/'):
                     img_path_clean = img_path_clean[1:]
 
-                img_data = zf.read(img_path_clean)
+                # 尝试直接读取
+                img_data = None
+                if img_path_clean in all_names:
+                    img_data = zf.read(img_path_clean)
+                else:
+                    # 尝试 URL 解码后的路径
+                    decoded = urllib.parse.unquote(img_path_clean)
+                    if decoded in all_names:
+                        img_data = zf.read(decoded)
+                    else:
+                        # 尝试在所有文件名中模糊匹配
+                        basename = os.path.basename(img_path_clean)
+                        matches = [n for n in all_names if n.endswith('/' + basename) or n == basename]
+                        if matches:
+                            img_data = zf.read(matches[0])
+
+                if img_data is None:
+                    print(f"  ⚠️ EPUB: 找不到图片: {img_path_clean}")
+                    continue
+
                 ext = Path(img_path_clean).suffix.lower()
                 if not ext:
                     ext = '.jpg'
-                # 用序号命名保持顺序
-                out_name = f"{idx + 1:04d}{ext}"
+                out_name = f"{extracted_count + 1:04d}{ext}"
                 out_path = os.path.join(dest_dir, out_name)
                 with open(out_path, 'wb') as f:
                     f.write(img_data)
-            except (KeyError, Exception):
+                extracted_count += 1
+            except Exception as e:
+                print(f"  ⚠️ EPUB: 提取 {img_path} 失败: {e}")
                 continue
+
+        print(f"📖 EPUB: 从 {len(image_items)} 个引用中提取了 {extracted_count} 张图片")
 
 
 def extract_archive(archive_path, dest_dir=None):

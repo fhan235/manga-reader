@@ -1087,7 +1087,7 @@ html, body {
       <kbd>Space</kbd> 向下滚动<br>
       <kbd>S</kbd> 侧栏 &nbsp; <kbd>T</kbd> 回顶部 &nbsp;
       <kbd>F</kbd> 全屏 &nbsp; <kbd>M</kbd> 切换模式<br>
-      <kbd>O</kbd> 打开文件夹
+      <kbd>O</kbd> 打开文件夹 &nbsp; <kbd>H</kbd> 返回书架
     </div>
   </aside>
 
@@ -1095,6 +1095,7 @@ html, body {
   <div class="main">
     <div class="toolbar">
       <button class="btn" id="btnToggleSidebar" title="切换侧栏 (S)">☰</button>
+      <button class="btn" id="btnBackHome" title="返回书架 (H)" style="display:none">🏠 书架</button>
       <button class="btn accent" id="btnOpenFolder" title="打开文件夹 (O)">📂 文件夹</button>
       <button class="btn" id="btnOpenFile" title="打开压缩包">📦 文件</button>
       <button class="btn" id="btnPrevChapter" title="上一章 (←)" disabled>◀ 上一章</button>
@@ -1166,6 +1167,7 @@ const el = {
   modeSelect:     $('modeSelect'),
   btnFullscreen:  $('btnFullscreen'),
   btnSidebar:     $('btnToggleSidebar'),
+  btnBackHome:    $('btnBackHome'),
   btnOpenFolder:  $('btnOpenFolder'),
   btnOpenFile:    $('btnOpenFile'),
   btnOpenSmall:   $('btnOpenSmall'),
@@ -1270,6 +1272,7 @@ function onMangaLoaded(manga, serverProgress) {
   state.currentPage = 0;
   renderSidebar();
   document.title = `${manga.manga_name} - 漫画阅读器`;
+  el.btnBackHome.style.display = '';
 
   // 恢复阅读进度：优先用服务端的（精确到页）
   let targetChapter = 0;
@@ -1429,6 +1432,11 @@ async function showWelcome() {
   el.btnPrev.disabled = true;
   el.btnNext.disabled = true;
   el.pageIndicator.textContent = '';
+  el.btnBackHome.style.display = 'none';
+  el.progressFill.style.width = '0%';
+  state.manga = null;
+  state.currentChapter = -1;
+  document.title = '漫画阅读器';
 }
 
 async function removeFromLibrary(path, e) {
@@ -1775,6 +1783,7 @@ el.readerViewport.addEventListener('scroll', () => {
 
 // ==================== 工具栏按钮 ====================
 el.btnSidebar.addEventListener('click', toggleSidebar);
+el.btnBackHome.addEventListener('click', goBackHome);
 el.btnOpenFolder.addEventListener('click', pickFolder);
 el.btnOpenFile.addEventListener('click', pickFile);
 el.btnOpenSmall.addEventListener('click', pickFolder);
@@ -1789,6 +1798,14 @@ el.modeSelect.addEventListener('change', () => {
 function toggleSidebar() {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   el.sidebar.classList.toggle('collapsed', state.sidebarCollapsed);
+}
+
+function goBackHome() {
+  // 先保存当前进度
+  if (state.manga && state.currentChapter >= 0) {
+    saveProgressToServer();
+  }
+  showWelcome();
 }
 
 function toggleFullscreen() {
@@ -1838,6 +1855,7 @@ document.addEventListener('keydown', (e) => {
     case 'f': case 'F': toggleFullscreen(); break;
     case 'm': case 'M': cycleReadingMode(); break;
     case 'o': case 'O': pickFolder(); break;
+    case 'h': case 'H': goBackHome(); break;
     case 'ArrowUp':
       e.preventDefault();
       el.readerViewport.scrollBy({ top: -200, behavior: 'smooth' });
