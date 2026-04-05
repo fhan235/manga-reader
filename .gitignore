@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+
+# Build
+build/
+dist/
+*.spec.bak
+
+# App data
+.manga_history.json
+.manga_library.json
+.manga_progress.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temp
+_extracted_*/
+
+# Test data
+test-manga/
+test-manga.zip
