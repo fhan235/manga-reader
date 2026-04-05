@@ -48,8 +48,7 @@ def find_free_port():
 # ==================== 启动 HTTP 服务 ====================
 def start_server(port):
     """在后台线程中启动 HTTP 服务"""
-    from http.server import HTTPServer
-    srv = HTTPServer(('127.0.0.1', port), server.MangaHandler)
+    srv = server.ThreadingHTTPServer(('127.0.0.1', port), server.MangaHandler)
     srv.serve_forever()
 
 # ==================== 主函数 ====================

@@ -22,7 +22,12 @@ import tempfile
 import shutil
 import atexit
 from http.server import HTTPServer, SimpleHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
+
+# 多线程 HTTP 服务器（允许进度轮询请求与加载请求并发）
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
 # 尝试导入 rarfile（可选依赖）
 try:
@@ -59,6 +64,33 @@ def _cleanup_temp_dirs():
             pass
 
 atexit.register(_cleanup_temp_dirs)
+
+# 加载进度跟踪
+import threading
+_loading_status = {
+    "loading": False,
+    "progress": 0,       # 0-100
+    "current": "",       # 当前正在处理的文件名
+    "total": 0,          # 总文件数
+    "done": 0,           # 已完成数
+    "message": "",       # 状态消息
+}
+_loading_lock = threading.Lock()
+
+def _update_loading(loading=None, progress=None, current=None,
+                    total=None, done=None, message=None):
+    """线程安全地更新加载状态"""
+    with _loading_lock:
+        if loading is not None: _loading_status["loading"] = loading
+        if progress is not None: _loading_status["progress"] = progress
+        if current is not None: _loading_status["current"] = current
+        if total is not None: _loading_status["total"] = total
+        if done is not None: _loading_status["done"] = done
+        if message is not None: _loading_status["message"] = message
+
+def _get_loading_status():
+    with _loading_lock:
+        return dict(_loading_status)
 
 
 def natural_sort_key(s):
@@ -358,23 +390,39 @@ def scan_manga_folder(root_path):
                 })
 
         # 再处理压缩包文件（每个压缩包当一个章节）
-        for archive_file in archive_files:
+        arc_total = len(archive_files)
+        if arc_total > 0:
+            _update_loading(loading=True, total=arc_total, done=0, progress=0,
+                           message=f"正在解压 0/{arc_total} 个文件...")
+        for arc_idx, archive_file in enumerate(archive_files):
             try:
+                _update_loading(
+                    done=arc_idx,
+                    progress=int(arc_idx / arc_total * 100) if arc_total else 0,
+                    current=archive_file.name,
+                    message=f"正在解压 {arc_idx + 1}/{arc_total}：{archive_file.stem}..."
+                )
                 dest_dir = extract_archive(str(archive_file))
                 # 扫描解压后的目录
                 extracted_images = _collect_images_from_dir(dest_dir)
                 if extracted_images:
                     # 用压缩包文件名（去掉扩展名）作为章节名
                     ch_name = archive_file.stem
+                    # 给每个压缩包章节分配唯一虚拟路径前缀，
+                    # 避免不同压缩包解压出同名文件（如 0001.jpg）导致内容混淆
+                    virtual_path = f"_arc_ch_{arc_idx}"
                     chapters.append({
                         "name": ch_name,
-                        "path": "",  # 特殊标记
+                        "path": virtual_path,
                         "image_count": len(extracted_images),
                         "images": [img for img in extracted_images],
                         "_extracted_dir": dest_dir,  # 内部用
                     })
             except Exception as e:
                 print(f"⚠️ 解压失败 {archive_file.name}: {e}")
+        if arc_total > 0:
+            _update_loading(done=arc_total, progress=100,
+                           message="解压完成，正在加载...")
 
         # 如果有根目录图片但也有子目录/压缩包，把根目录图片也作为一个章节
         if root_images and (subdirs or archive_files):
@@ -698,18 +746,26 @@ class MangaHandler(SimpleHTTPRequestHandler):
     manga_data = None
     static_dir = None
     original_path = None  # 记录原始路径（压缩包时用）
-    # 映射：章节索引 → 解压后的临时目录
-    # 当文件夹里有压缩包时，压缩包解压到临时目录，
-    # 但 manga_root 是原始文件夹，需要这个映射来找到图片
-    _chapter_extracted_dirs = {}
+    # 映射：虚拟路径前缀（如 "_arc_ch_0"）→ 解压后的临时目录
+    # 当文件夹里有压缩包时，每个压缩包解压到临时目录，
+    # 通过虚拟路径前缀来精确定位每个章节的图片
+    _chapter_virtual_dirs = {}
 
     def log_message(self, format, *args):
         # 静默大部分请求日志
         pass
 
     def do_HEAD(self):
-        """HEAD 请求走同样的路由"""
-        self.do_GET()
+        """HEAD 请求只返回头部，不写 body"""
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        if path.startswith('/images/'):
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/jpeg')
+            self.end_headers()
+        else:
+            self.send_response(200)
+            self.end_headers()
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -737,6 +793,8 @@ class MangaHandler(SimpleHTTPRequestHandler):
             self.handle_pick_file()
         elif path == '/api/library':
             self.serve_json(load_library())
+        elif path == '/api/loading-status':
+            self.serve_json(_get_loading_status())
         elif path == '/api/progress':
             query = urllib.parse.parse_qs(parsed.query)
             manga_name = query.get('name', [''])[0]
@@ -814,19 +872,25 @@ class MangaHandler(SimpleHTTPRequestHandler):
         is_dir = os.path.isdir(path)
 
         if not is_file and not is_dir:
+            _update_loading(loading=False)
             self.serve_json({"ok": False, "error": f"路径不存在: {path}"})
             return
 
         if is_file and Path(path).suffix.lower() not in ARCHIVE_EXTENSIONS:
+            _update_loading(loading=False)
             self.serve_json({"ok": False, "error": f"不支持的文件格式: {Path(path).suffix}"})
             return
 
+        _update_loading(loading=True, progress=0, done=0, total=0,
+                       current="", message="正在扫描漫画目录...")
         manga_data = scan_manga_folder(path)
         if "error" in manga_data:
+            _update_loading(loading=False)
             self.serve_json({"ok": False, "error": manga_data['error']})
             return
 
         if manga_data['chapter_count'] == 0:
+            _update_loading(loading=False)
             self.serve_json({"ok": False, "error": "未找到漫画图片"})
             return
 
@@ -835,12 +899,12 @@ class MangaHandler(SimpleHTTPRequestHandler):
         MangaHandler.manga_data = manga_data
         MangaHandler.original_path = manga_data.get('original_path', path)
 
-        # 构建解压目录映射：章节索引 → 解压后的临时目录
-        MangaHandler._chapter_extracted_dirs = {}
-        for idx, ch in enumerate(manga_data.get('chapters', [])):
+        # 构建解压目录映射：虚拟路径前缀 → 解压后的临时目录
+        MangaHandler._chapter_virtual_dirs = {}
+        for ch in manga_data.get('chapters', []):
             extracted_dir = ch.get('_extracted_dir')
-            if extracted_dir:
-                MangaHandler._chapter_extracted_dirs[idx] = extracted_dir
+            if extracted_dir and ch.get('path', '').startswith('_arc_ch_'):
+                MangaHandler._chapter_virtual_dirs[ch['path']] = extracted_dir
 
         # 写入历史记录（存原始路径）
         history_path = manga_data.get('original_path', path)
@@ -855,6 +919,9 @@ class MangaHandler(SimpleHTTPRequestHandler):
         progress = get_progress(manga_data['manga_name'])
 
         print(f"📂 切换到: {path} ({manga_data['chapter_count']} 章)")
+
+        # 加载完成，重置进度
+        _update_loading(loading=False, progress=100, message="加载完成")
 
         # 返回时去掉内部字段
         clean_data = dict(manga_data)
@@ -956,18 +1023,20 @@ class MangaHandler(SimpleHTTPRequestHandler):
                 ch = self.manga_data['chapters'][0]
                 img_name = ch['images'][0]
                 img_path = ch['path']
-                # 先在 manga_root 下找
-                if img_path:
-                    file_path = Path(self.manga_root) / img_path / img_name
+                # 如果是压缩包章节（虚拟路径），去对应解压目录找
+                if img_path.startswith('_arc_ch_'):
+                    extracted_dir = self._chapter_virtual_dirs.get(img_path)
+                    if extracted_dir:
+                        file_path = Path(extracted_dir) / img_name
+                        if file_path.is_file():
+                            self._serve_file(file_path)
+                            return
                 else:
-                    file_path = Path(self.manga_root) / img_name
-                if file_path.is_file():
-                    self._serve_file(file_path)
-                    return
-                # 在解压目录中找
-                extracted_dir = self._chapter_extracted_dirs.get(0)
-                if extracted_dir:
-                    file_path = Path(extracted_dir) / img_name
+                    # 普通文件夹章节
+                    if img_path:
+                        file_path = Path(self.manga_root) / img_path / img_name
+                    else:
+                        file_path = Path(self.manga_root) / img_name
                     if file_path.is_file():
                         self._serve_file(file_path)
                         return
@@ -993,21 +1062,21 @@ class MangaHandler(SimpleHTTPRequestHandler):
                     img_name = ch['images'][0]
                     img_path = ch['path']
                     root = data['root_path']
-                    # 在 root 下找
-                    if img_path:
-                        file_path = Path(root) / img_path / img_name
-                    else:
-                        file_path = Path(root) / img_name
-                    if file_path.is_file():
-                        self._serve_file(file_path)
-                        return
-                    # 在解压目录中找
+                    # 压缩包章节优先在解压目录中找
                     extracted_dir = ch.get('_extracted_dir')
                     if extracted_dir:
                         file_path = Path(extracted_dir) / img_name
                         if file_path.is_file():
                             self._serve_file(file_path)
                             return
+                    # 普通文件夹章节在 root 下找
+                    if img_path and not img_path.startswith('_arc_ch_'):
+                        file_path = Path(root) / img_path / img_name
+                    else:
+                        file_path = Path(root) / img_name
+                    if file_path.is_file():
+                        self._serve_file(file_path)
+                        return
         except Exception:
             pass
 
@@ -1073,23 +1142,33 @@ class MangaHandler(SimpleHTTPRequestHandler):
             return
 
         relative_path = urllib.parse.unquote(relative_path)
-        file_path = Path(self.manga_root) / relative_path
+
+        # 检查是否是压缩包章节的虚拟路径（_arc_ch_N/...）
+        # 这些路径不在 manga_root 下，而是在对应的解压临时目录里
+        file_path = None
+        if relative_path.startswith('_arc_ch_'):
+            # 从虚拟路径中提取章节标识和实际文件名
+            # 格式: _arc_ch_0/0001.jpg 或 _arc_ch_0/subdir/0001.jpg
+            parts = relative_path.split('/', 1)
+            if len(parts) == 2:
+                arc_prefix = parts[0]  # e.g. "_arc_ch_0"
+                img_rel = parts[1]     # e.g. "0001.jpg"
+                # 在 _chapter_virtual_dirs 中通过虚拟路径找到对应目录
+                extracted_dir = self._chapter_virtual_dirs.get(arc_prefix)
+                if extracted_dir:
+                    file_path = Path(extracted_dir) / img_rel
+                    if not file_path.is_file():
+                        file_path = None
+
+        # 非压缩包章节，走正常的 manga_root 查找
+        if file_path is None:
+            file_path = Path(self.manga_root) / relative_path
 
         if not file_path.is_file():
-            # 在 manga_root 下找不到，尝试在解压临时目录中查找
-            found = False
-            for ch_idx, extracted_dir in self._chapter_extracted_dirs.items():
-                alt_path = Path(extracted_dir) / relative_path
-                if alt_path.is_file():
-                    file_path = alt_path
-                    found = True
-                    break
+            self.send_error(404, f"Image not found: {relative_path}")
+            return
 
-            if not found:
-                self.send_error(404, f"Image not found: {relative_path}")
-                return
-
-        # 安全检查：文件必须在 manga_root 或某个解压目录下
+        # 安全检查：文件必须在 manga_root 或某个允许的解压目录下
         resolved = file_path.resolve()
         allowed = False
         try:
@@ -1099,7 +1178,7 @@ class MangaHandler(SimpleHTTPRequestHandler):
             pass
 
         if not allowed:
-            for ch_idx, extracted_dir in self._chapter_extracted_dirs.items():
+            for extracted_dir in self._chapter_virtual_dirs.values():
                 try:
                     resolved.relative_to(Path(extracted_dir).resolve())
                     allowed = True
@@ -1126,12 +1205,15 @@ class MangaHandler(SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'public, max-age=86400')
         self.end_headers()
 
-        with open(file_path, 'rb') as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+        try:
+            with open(file_path, 'rb') as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 客户端断开连接，忽略
 
     def serve_static(self, filename):
         file_path = Path(self.static_dir) / filename
@@ -1189,11 +1271,11 @@ def main():
         MangaHandler.original_path = manga_data.get('original_path', manga_path)
 
         # 构建解压目录映射
-        MangaHandler._chapter_extracted_dirs = {}
-        for idx, ch in enumerate(manga_data.get('chapters', [])):
+        MangaHandler._chapter_virtual_dirs = {}
+        for ch in manga_data.get('chapters', []):
             extracted_dir = ch.get('_extracted_dir')
-            if extracted_dir:
-                MangaHandler._chapter_extracted_dirs[idx] = extracted_dir
+            if extracted_dir and ch.get('path', '').startswith('_arc_ch_'):
+                MangaHandler._chapter_virtual_dirs[ch['path']] = extracted_dir
 
         # 写入历史记录
         history_path = manga_data.get('original_path', manga_path)
@@ -1210,7 +1292,7 @@ def main():
         MangaHandler.manga_data = None
 
     # 启动服务
-    server = HTTPServer(('127.0.0.1', args.port), MangaHandler)
+    server = ThreadingHTTPServer(('127.0.0.1', args.port), MangaHandler)
     url = f"http://127.0.0.1:{args.port}"
     print(f"\n🚀 阅读器已启动: {url}")
     print(f"   支持格式: 文件夹、ZIP、CBZ、RAR、CBR、EPUB（图片型）")
