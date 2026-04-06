@@ -1115,6 +1115,123 @@ html, body {
   font-family: monospace;
 }
 
+/* ========== 下载通知弹窗 ========== */
+.dl-notification {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 360px;
+  max-width: calc(100vw - 48px);
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  z-index: 9999;
+  transform: translateY(120%) scale(0.95);
+  opacity: 0;
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  overflow: hidden;
+}
+
+.dl-notification.visible {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+
+.dl-notif-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(74, 158, 255, 0.1);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent);
+}
+
+.dl-notif-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.15s;
+}
+
+.dl-notif-close:hover {
+  color: var(--danger);
+  background: rgba(231, 76, 60, 0.1);
+}
+
+.dl-notif-list {
+  padding: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.dl-notif-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.dl-notif-item:hover {
+  background: var(--bg-hover);
+}
+
+.dl-notif-icon {
+  font-size: 28px;
+  flex-shrink: 0;
+}
+
+.dl-notif-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.dl-notif-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dl-notif-size {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.dl-notif-import {
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.dl-notif-import:hover {
+  background: var(--accent-hover);
+  transform: scale(1.05);
+}
+
 /* ========== 响应式 ========== */
 @media (max-width: 768px) {
   :root { --sidebar-width: 260px; }
@@ -1169,6 +1286,7 @@ html, body {
       <button class="btn" id="btnBackHome" title="返回书架 (H)" style="display:none">🏠 书架</button>
       <button class="btn accent" id="btnOpenFolder" title="打开文件夹 (O)">📂 文件夹</button>
       <button class="btn" id="btnOpenFile" title="打开压缩包">📦 文件</button>
+      <button class="btn" id="btnOnlineResource" title="在线资源 (koz.moe)" style="color:var(--accent)">🌐 在线</button>
       <button class="btn" id="btnPrevChapter" title="上一章 ([)" disabled>◀ 上一章</button>
       <span class="chapter-nav-title" id="currentChapterTitle">选择章节开始阅读</span>
       <button class="btn" id="btnNextChapter" title="下一章 (])" disabled>下一章 ▶</button>
@@ -1248,6 +1366,7 @@ const el = {
   btnOpenFolder:  $('btnOpenFolder'),
   btnOpenFile:    $('btnOpenFile'),
   btnOpenSmall:   $('btnOpenSmall'),
+  btnOnlineResource: $('btnOnlineResource'),
   scrollTopBtn:   $('scrollTopBtn'),
   progressFill:   $('progressFill'),
   sidebar:        $('sidebar'),
@@ -1535,6 +1654,7 @@ async function showWelcome() {
       <div class="welcome-actions">
         <button class="welcome-btn primary" onclick="pickFolder()">📂 选择文件夹</button>
         <button class="welcome-btn secondary" onclick="pickFile()">📦 打开压缩包</button>
+        <button class="welcome-btn secondary" onclick="openOnlineResource()" style="border-color:var(--accent);color:var(--accent)">🌐 在线资源</button>
       </div>
 
       <div class="or-divider">或者直接输入路径</div>
@@ -1576,6 +1696,106 @@ async function removeFromLibrary(path, e) {
   } catch (e) { /* ignore */ }
 }
 
+// ==================== 在线资源跳转 ====================
+function openOnlineResource() {
+  // 通过后端 API 打开外部浏览器（pywebview 环境下）或直接 window.open
+  fetch('/api/open-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: 'https://koz.moe/' })
+  }).catch(() => {
+    // 如果后端不支持，回退到 window.open
+    window.open('https://koz.moe/', '_blank');
+  });
+}
+
+// ==================== 下载目录监听（方案B）====================
+let _downloadPollTimer = null;
+let _knownDownloads = new Set(); // 已知的下载文件，避免重复通知
+
+// 通知弹窗 CSS 已在下方 style 注入
+function showDownloadNotification(files) {
+  // 移除旧通知
+  const oldNotif = document.getElementById('downloadNotification');
+  if (oldNotif) oldNotif.remove();
+
+  const fileItems = files.map(f => {
+    const escapedPath = f.path.replace(/'/g, "\\'");
+    return `
+      <div class="dl-notif-item">
+        <span class="dl-notif-icon">${f.name.match(/\.epub$/i) ? '📖' : '📦'}</span>
+        <div class="dl-notif-info">
+          <div class="dl-notif-name">${f.name}</div>
+          <div class="dl-notif-size">${f.size}</div>
+        </div>
+        <button class="dl-notif-import" onclick="importDownloadedFile('${escapedPath}')">导入阅读</button>
+      </div>
+    `;
+  }).join('');
+
+  const notif = document.createElement('div');
+  notif.id = 'downloadNotification';
+  notif.className = 'dl-notification';
+  notif.innerHTML = `
+    <div class="dl-notif-header">
+      <span>📥 检测到新下载的漫画文件</span>
+      <button class="dl-notif-close" onclick="dismissDownloadNotification()">✕</button>
+    </div>
+    <div class="dl-notif-list">${fileItems}</div>
+  `;
+  document.body.appendChild(notif);
+
+  // 自动滑入
+  requestAnimationFrame(() => notif.classList.add('visible'));
+
+  // 30秒后自动关闭
+  setTimeout(() => dismissDownloadNotification(), 30000);
+}
+
+function dismissDownloadNotification() {
+  const notif = document.getElementById('downloadNotification');
+  if (notif) {
+    notif.classList.remove('visible');
+    setTimeout(() => notif.remove(), 300);
+  }
+}
+
+async function importDownloadedFile(path) {
+  dismissDownloadNotification();
+  openByPath(path);
+}
+
+// 轮询检查下载目录中的新漫画文件
+async function pollDownloads() {
+  try {
+    const res = await fetch('/api/check-downloads');
+    const data = await res.json();
+    if (data.files && data.files.length > 0) {
+      // 过滤掉已通知过的
+      const newFiles = data.files.filter(f => !_knownDownloads.has(f.path));
+      if (newFiles.length > 0) {
+        newFiles.forEach(f => _knownDownloads.add(f.path));
+        showDownloadNotification(newFiles);
+      }
+    }
+  } catch (e) { /* ignore */ }
+}
+
+function startDownloadPolling() {
+  // 先获取已有文件列表（初始化 known set）
+  fetch('/api/check-downloads?init=1')
+    .then(res => res.json())
+    .then(data => {
+      if (data.files) {
+        data.files.forEach(f => _knownDownloads.add(f.path));
+      }
+    })
+    .catch(() => {});
+
+  // 每 5 秒检查一次
+  _downloadPollTimer = setInterval(pollDownloads, 5000);
+}
+
 // ==================== 初始加载 ====================
 async function init() {
   try {
@@ -1589,6 +1809,8 @@ async function init() {
   } catch (e) {
     showWelcome();
   }
+  // 启动下载目录监听
+  startDownloadPolling();
 }
 
 // ==================== 侧边栏 ====================
@@ -2004,6 +2226,7 @@ el.btnBackHome.addEventListener('click', goBackHome);
 el.btnOpenFolder.addEventListener('click', pickFolder);
 el.btnOpenFile.addEventListener('click', pickFile);
 el.btnOpenSmall.addEventListener('click', pickFolder);
+el.btnOnlineResource.addEventListener('click', openOnlineResource);
 el.btnPrev.addEventListener('click', () => loadChapter(state.currentChapter - 1));
 el.btnNext.addEventListener('click', () => loadChapter(state.currentChapter + 1));
 el.scrollTopBtn.addEventListener('click', () => el.readerViewport.scrollTo({ top: 0, behavior: 'smooth' }));

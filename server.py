@@ -52,6 +52,14 @@ LIBRARY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.manga_
 # 阅读进度文件（精确到页）
 PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.manga_progress.json')
 
+# 下载目录监听配置
+DOWNLOAD_DIRS = [
+    os.path.expanduser('~/Downloads'),
+    os.path.expanduser('~/Desktop'),
+]
+# 被监听的漫画文件扩展名
+WATCHED_EXTENSIONS = {'.zip', '.cbz', '.cbr', '.rar', '.epub'}
+
 # 临时解压目录管理
 _temp_dirs = []
 
@@ -688,6 +696,55 @@ def get_progress(manga_name):
     return data.get(manga_name, None)
 
 
+# ==================== 下载目录监听 ====================
+
+def _format_file_size(size_bytes):
+    """格式化文件大小"""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.1f} GB"
+
+
+def scan_download_dirs():
+    """扫描下载目录中的漫画文件"""
+    results = []
+    for dir_path in DOWNLOAD_DIRS:
+        if not os.path.isdir(dir_path):
+            continue
+        try:
+            for fname in os.listdir(dir_path):
+                fpath = os.path.join(dir_path, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in WATCHED_EXTENSIONS:
+                    continue
+                # 跳过太小的文件（< 100KB，可能正在下载中）
+                try:
+                    fstat = os.stat(fpath)
+                    if fstat.st_size < 100 * 1024:
+                        continue
+                    results.append({
+                        'name': fname,
+                        'path': fpath,
+                        'size': _format_file_size(fstat.st_size),
+                        'mtime': fstat.st_mtime,
+                    })
+                except OSError:
+                    continue
+        except PermissionError:
+            continue
+    # 按修改时间倒序（最新的在前）
+    results.sort(key=lambda x: x['mtime'], reverse=True)
+    # 最多返回 10 个
+    return results[:10]
+
+
 # ==================== macOS 文件选择 ====================
 
 def pick_folder_macos():
@@ -806,6 +863,9 @@ class MangaHandler(SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             manga_path = query.get('path', [''])[0]
             self.serve_cover(manga_path)
+        elif path == '/api/check-downloads':
+            files = scan_download_dirs()
+            self.serve_json({"files": files})
         elif path.startswith('/images/'):
             self.serve_image(path[8:])
         elif path == '/favicon.ico':
@@ -820,6 +880,8 @@ class MangaHandler(SimpleHTTPRequestHandler):
 
         if path == '/api/open':
             self.handle_open_folder()
+        elif path == '/api/open-url':
+            self.handle_open_url()
         elif path == '/api/remove-history':
             self.handle_remove_history()
         elif path == '/api/library/add':
@@ -830,6 +892,27 @@ class MangaHandler(SimpleHTTPRequestHandler):
             self.handle_save_progress()
         else:
             self.send_error(404)
+
+    def handle_open_url(self):
+        """在系统默认浏览器中打开 URL"""
+        content_len = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_len)
+        try:
+            data = json.loads(body.decode('utf-8'))
+            url = data.get('url', '').strip()
+        except Exception:
+            self.serve_json({"ok": False, "error": "无效请求"})
+            return
+
+        if not url or not (url.startswith('http://') or url.startswith('https://')):
+            self.serve_json({"ok": False, "error": "无效URL"})
+            return
+
+        try:
+            webbrowser.open(url)
+            self.serve_json({"ok": True})
+        except Exception as e:
+            self.serve_json({"ok": False, "error": str(e)})
 
     def handle_pick_folder(self):
         """弹出 macOS 原生文件夹选择对话框"""
