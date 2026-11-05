@@ -5,6 +5,9 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+#ifndef AppVersionNum
+  #define AppVersionNum "1.0.0.0"
+#endif
 
 #define AppName "漫画阅读器"
 #define AppExe "MangaReader.exe"
@@ -15,6 +18,9 @@
 AppId={{7C4B1F52-9A3E-4E6D-9C1B-2F5D8A0E3B77}
 AppName={#AppName}
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersionNum}
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription={#AppName} Setup
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}

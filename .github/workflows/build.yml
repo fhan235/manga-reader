@@ -37,8 +37,16 @@ jobs:
           else
             ver="0.0.0-$(echo "${GITHUB_SHA}" | cut -c1-7)"
           fi
+          # Inno Setup 的 VersionInfoVersion 必须是纯数字四段版本号
+          num=$(printf '%s' "$ver" | sed -E 's/^([0-9]+(\.[0-9]+){0,2}).*/\1/')
+          case "$num" in
+            *.*.*) : ;;
+            *.*)   num="$num.0" ;;
+            *)     num="$num.0.0" ;;
+          esac
           echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
-          echo "版本号: $ver"
+          echo "APP_VERSION_NUM=$num.0" >> "$GITHUB_ENV"
+          echo "版本号: $ver ($num.0)"
 
       - name: 安装依赖
         run: |
@@ -81,7 +89,7 @@ jobs:
             $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           }
           if (-not (Test-Path $iscc)) { throw 'ISCC.exe 不存在，Inno Setup 安装失败' }
-          & $iscc "/DAppVersion=$env:APP_VERSION" "installer\MangaReader.iss"
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DAppVersionNum=$env:APP_VERSION_NUM" "installer\MangaReader.iss"
           if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
 
       - name: 列出产物

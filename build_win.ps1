@@ -29,6 +29,14 @@ $env:MR_ONEFILE = if ($OneFile) { '1' } else { '0' }
 $env:MR_CONSOLE = if ($Console) { '1' } else { '0' }
 $env:PYTHONIOENCODING = 'utf-8'
 if (-not $env:APP_VERSION) { $env:APP_VERSION = '1.0.0' }
+# Inno Setup 的 VersionInfoVersion 必须是纯数字四段版本号
+if (-not $env:APP_VERSION_NUM) {
+    $m = [regex]::Match($env:APP_VERSION, '^[0-9]+(\.[0-9]+){0,2}')
+    $num = if ($m.Success) { $m.Value } else { '1.0.0' }
+    $parts = $num.Split('.')
+    while ($parts.Count -lt 3) { $parts += '0' }
+    $env:APP_VERSION_NUM = ($parts -join '.') + '.0'
+}
 
 Write-Host "== PyInstaller 打包 (v$env:APP_VERSION) ==" -ForegroundColor Cyan
 if ($OneFile) {
@@ -66,7 +74,7 @@ if ($Installer) {
         Write-Host '== 未找到 Inno Setup 6，跳过安装包（winget install JRSoftware.InnoSetup）==' -ForegroundColor Yellow
     } else {
         Write-Host '== 编译安装包 ==' -ForegroundColor Cyan
-        & $iscc "/DAppVersion=$env:APP_VERSION" 'installer\MangaReader.iss'
+        & $iscc "/DAppVersion=$env:APP_VERSION" "/DAppVersionNum=$env:APP_VERSION_NUM" 'installer\MangaReader.iss'
         if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
         Write-Host "== 安装包: .\dist\MangaReader-$env:APP_VERSION-windows-x64-setup.exe ==" -ForegroundColor Green
     }
