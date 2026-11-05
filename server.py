@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Mac 本地漫画阅读器 - 后端服务
+本地漫画阅读器 - 后端服务（macOS / Windows / Linux 通用）
 用法:
   python3 server.py                          # 无参启动，在浏览器里选择文件夹
   python3 server.py /path/to/manga/folder    # 直接指定路径
   python3 server.py /path/to/manga.zip       # 直接打开压缩包
   python3 server.py --port 8899              # 自定义端口
+  python server.py "C:\\漫画\\火影忍者"        # Windows 路径
 """
 
 import os
@@ -21,9 +22,42 @@ import zipfile
 import tempfile
 import shutil
 import atexit
+import platform
+import threading
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from pathlib import Path
+
+IS_WIN = sys.platform.startswith('win')
+IS_MAC = sys.platform == 'darwin'
+
+# ==================== 控制台输出兜底 ====================
+# 1) Windows 控制台默认 GBK 编码，打印 emoji / 特殊符号会抛 UnicodeEncodeError；
+# 2) PyInstaller --windowed 打包后 sys.stdout / sys.stderr 直接是 None。
+class _NullWriter:
+    encoding = 'utf-8'
+
+    def write(self, *_args, **_kwargs):
+        return 0
+
+    def flush(self):
+        pass
+
+    def isatty(self):
+        return False
+
+
+for _stream_name in ('stdout', 'stderr'):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is None:
+        setattr(sys, _stream_name, _NullWriter())
+        continue
+    try:
+        # 只放宽错误处理、不改编码：GBK 控制台里的中文仍然正常显示
+        _stream.reconfigure(errors='replace')
+    except Exception:
+        pass
+
 
 # 多线程 HTTP 服务器（允许进度轮询请求与加载请求并发）
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
@@ -42,20 +76,78 @@ IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '
 # 支持的压缩包格式
 ARCHIVE_EXTENSIONS = {'.zip', '.cbz', '.cbr', '.rar', '.epub'}
 
+# 数据目录：默认放脚本同级（开发环境）。
+# 打包成 App 后由 app.py 通过环境变量 MANGA_READER_DATA_DIR 指到用户目录，
+# 避免把历史 / 书架 / 进度写进 PyInstaller 的临时解包目录（_MEIPASS）。
+DATA_DIR = os.environ.get('MANGA_READER_DATA_DIR') or os.path.dirname(os.path.abspath(__file__))
+
 # 最近打开记录文件
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.manga_history.json')
+HISTORY_FILE = os.path.join(DATA_DIR, '.manga_history.json')
 MAX_HISTORY = 20
 
 # 书架数据文件
-LIBRARY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.manga_library.json')
+LIBRARY_FILE = os.path.join(DATA_DIR, '.manga_library.json')
 
 # 阅读进度文件（精确到页）
-PROGRESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.manga_progress.json')
+PROGRESS_FILE = os.path.join(DATA_DIR, '.manga_progress.json')
+
+# ==================== 跨平台用户目录 ====================
+# Windows 的「下载」「桌面」在中文系统里是本地化目录名（下载 / 桌面），
+# expanduser('~/Downloads') 取不到，必须走 Known Folder API。
+_KNOWN_FOLDER_IDS = {
+    'downloads': (0x374DE290, 0x123F, 0x4565,
+                  (0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B)),
+    'desktop': (0xB4BFCC3A, 0xDB2C, 0x424C,
+                (0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41)),
+}
+
+
+def _windows_known_folder(kind):
+    """Windows: 通过 SHGetKnownFolderPath 取 FOLDERID_Downloads / FOLDERID_Desktop"""
+    spec = _KNOWN_FOLDER_IDS.get(kind)
+    if not spec or not IS_WIN:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ('Data1', wintypes.DWORD),
+                ('Data2', wintypes.WORD),
+                ('Data3', wintypes.WORD),
+                ('Data4', ctypes.c_ubyte * 8),
+            ]
+
+        d1, d2, d3, d4 = spec
+        guid = GUID(d1, d2, d3, (ctypes.c_ubyte * 8)(*d4))
+        path_ptr = ctypes.c_void_p()
+        hres = ctypes.windll.shell32.SHGetKnownFolderPath(
+            ctypes.byref(guid), 0, None, ctypes.byref(path_ptr))
+        if hres == 0 and path_ptr.value:
+            try:
+                return ctypes.wstring_at(path_ptr.value)
+            finally:
+                ctypes.windll.ole32.CoTaskMemFree(path_ptr)
+    except Exception:
+        pass
+    return None
+
+
+def user_folder(kind):
+    """取用户的下载 / 桌面目录（跨平台）"""
+    if IS_WIN:
+        p = _windows_known_folder(kind)
+        if p:
+            return p
+    fallback = {'downloads': 'Downloads', 'desktop': 'Desktop'}.get(kind, kind)
+    return os.path.expanduser(os.path.join('~', fallback))
+
 
 # 下载目录监听配置
 DOWNLOAD_DIRS = [
-    os.path.expanduser('~/Downloads'),
-    os.path.expanduser('~/Desktop'),
+    user_folder('downloads'),
+    user_folder('desktop'),
 ]
 # 被监听的漫画文件扩展名
 WATCHED_EXTENSIONS = {'.zip', '.cbz', '.cbr', '.rar', '.epub'}
@@ -74,7 +166,6 @@ def _cleanup_temp_dirs():
 atexit.register(_cleanup_temp_dirs)
 
 # 加载进度跟踪
-import threading
 _loading_status = {
     "loading": False,
     "progress": 0,       # 0-100
@@ -495,7 +586,7 @@ def scan_archive(archive_path):
                     key=lambda f: natural_sort_key(f.name)
                 )
                 if images:
-                    rel_path = str(subdir.relative_to(dest))
+                    rel_path = subdir.relative_to(dest).as_posix()
                     chapters.append({
                         "name": subdir.name,
                         "path": rel_path,
@@ -503,7 +594,7 @@ def scan_archive(archive_path):
                         "images": [f.name for f in images]
                     })
         elif inner_images:
-            rel_path = str(single_dir.relative_to(dest))
+            rel_path = single_dir.relative_to(dest).as_posix()
             chapters.append({
                 "name": manga_name,
                 "path": rel_path,
@@ -517,7 +608,7 @@ def scan_archive(archive_path):
                 key=lambda f: natural_sort_key(f.name)
             )
             if images:
-                rel_path = str(subdir.relative_to(dest))
+                rel_path = subdir.relative_to(dest).as_posix()
                 chapters.append({
                     "name": subdir.name,
                     "path": rel_path,
@@ -546,7 +637,7 @@ def scan_archive(archive_path):
                 key=lambda f: natural_sort_key(f.name)
             )
             if images:
-                rel_path = str(subdir.relative_to(dest))
+                rel_path = subdir.relative_to(dest).as_posix()
                 chapters.append({
                     "name": subdir.name,
                     "path": rel_path,
@@ -577,7 +668,8 @@ def _collect_images_from_dir(dir_path):
             if is_image_file(f) and not f.startswith('.'):
                 full = os.path.join(root, f)
                 rel = os.path.relpath(full, dir_path)
-                images.append(rel)
+                # 统一用 POSIX 分隔符：前端直接拼进 URL，Windows 的反斜杠会破坏路径
+                images.append(rel.replace(os.sep, '/'))
     images.sort(key=natural_sort_key)
     return images
 
@@ -745,7 +837,7 @@ def scan_download_dirs():
     return results[:10]
 
 
-# ==================== macOS 文件选择 ====================
+# ==================== 原生文件选择（跨平台） ====================
 
 def pick_folder_macos():
     """调用 macOS 原生文件夹选择对话框"""
@@ -792,6 +884,154 @@ def pick_file_macos():
     except Exception:
         pass
     return None
+
+
+def _pick_with_tk(kind='folder'):
+    """
+    Windows / Linux：用 tkinter 调系统原生对话框。
+    Tk 要求“创建它的线程”负责事件循环，而 HTTP 请求本身就在独立工作线程里，
+    所以这里在该工作线程内自建一个隐藏的 Tk 根窗口，用完即销毁。
+    """
+    holder = {}
+
+    def _run():
+        tk_root = None
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+
+            tk_root = tk.Tk()
+            tk_root.withdraw()
+            tk_root.attributes('-topmost', True)
+            tk_root.update()
+
+            if kind == 'folder':
+                path = filedialog.askdirectory(
+                    parent=tk_root, title='选择漫画文件夹', mustexist=True)
+            else:
+                path = filedialog.askopenfilename(
+                    parent=tk_root,
+                    title='选择漫画文件（ZIP/CBZ/RAR/CBR/EPUB）',
+                    filetypes=[
+                        ('漫画压缩包', '*.zip *.cbz *.rar *.cbr *.epub'),
+                        ('ZIP', '*.zip *.cbz'),
+                        ('RAR', '*.rar *.cbr'),
+                        ('EPUB', '*.epub'),
+                        ('所有文件', '*.*'),
+                    ])
+            holder['path'] = path or None
+        except Exception as exc:
+            holder['error'] = str(exc)
+            holder['path'] = None
+        finally:
+            try:
+                if tk_root is not None:
+                    tk_root.destroy()
+            except Exception:
+                pass
+
+    worker = threading.Thread(target=_run, daemon=True)
+    worker.start()
+    worker.join(timeout=600)  # 用户可能开着对话框想很久
+    if holder.get('error'):
+        print(f"对话框失败: {holder['error']}")
+    return holder.get('path') or None
+
+
+def pick_folder_dialog():
+    """跨平台文件夹选择：macOS 走 osascript，Windows / Linux 走 tkinter"""
+    if IS_MAC:
+        return pick_folder_macos()
+    return _pick_with_tk('folder')
+
+
+def pick_file_dialog():
+    """跨平台文件选择：macOS 走 osascript，Windows / Linux 走 tkinter"""
+    if IS_MAC:
+        return pick_file_macos()
+    return _pick_with_tk('file')
+
+
+# ==================== 打开漫画（供 app.py / CLI 复用） ====================
+
+def apply_manga_state(manga_data):
+    """把扫描结果装进 MangaHandler 的全局状态"""
+    MangaHandler.manga_root = manga_data['root_path']
+    MangaHandler.manga_data = manga_data
+    MangaHandler.original_path = manga_data.get('original_path', manga_data['root_path'])
+    MangaHandler._chapter_virtual_dirs = {}
+    for ch in manga_data.get('chapters', []):
+        extracted_dir = ch.get('_extracted_dir')
+        if extracted_dir and ch.get('path', '').startswith('_arc_ch_'):
+            MangaHandler._chapter_virtual_dirs[ch['path']] = extracted_dir
+    return manga_data
+
+
+def clean_manga_data(manga_data):
+    """去掉内部字段（_extracted_dir 等），用于输出给前端"""
+    clean_data = dict(manga_data)
+    clean_chapters = []
+    for ch in clean_data.get('chapters', []):
+        clean_chapters.append({k: v for k, v in ch.items() if not k.startswith('_')})
+    clean_data['chapters'] = clean_chapters
+    return clean_data
+
+
+def open_manga_path(path, record_history=True):
+    """
+    扫描指定路径（文件夹或压缩包）并切换当前漫画。
+    返回 {"ok": True, "manga": ..., "progress": ...} 或 {"ok": False, "error": ...}
+    """
+    if not path:
+        return {"ok": False, "error": "路径为空"}
+
+    path = path.strip().strip('"').strip("'")
+    path = os.path.expanduser(path)
+    path = os.path.normpath(os.path.abspath(path))
+
+    is_file = os.path.isfile(path)
+    is_dir = os.path.isdir(path)
+
+    if not is_file and not is_dir:
+        _update_loading(loading=False)
+        return {"ok": False, "error": f"路径不存在: {path}"}
+
+    if is_file and Path(path).suffix.lower() not in ARCHIVE_EXTENSIONS:
+        _update_loading(loading=False)
+        return {"ok": False, "error": f"不支持的文件格式: {Path(path).suffix}"}
+
+    _update_loading(loading=True, progress=0, done=0, total=0,
+                    current="", message="正在扫描漫画目录...")
+
+    manga_data = scan_manga_folder(path)
+    if "error" in manga_data:
+        _update_loading(loading=False)
+        return {"ok": False, "error": manga_data["error"]}
+
+    if manga_data["chapter_count"] == 0:
+        _update_loading(loading=False)
+        return {"ok": False, "error": "未找到漫画图片"}
+
+    apply_manga_state(manga_data)
+
+    history_path = manga_data.get('original_path', path)
+    if record_history:
+        add_to_history(history_path, manga_data['manga_name'])
+        cover = None
+        if manga_data['chapters'] and manga_data['chapters'][0]['images']:
+            cover = manga_data['chapters'][0]['images'][0]
+        add_to_library(history_path, manga_data['manga_name'],
+                       manga_data['chapter_count'], cover)
+
+    progress = get_progress(manga_data['manga_name'])
+    print(f"📂 切换到: {path} ({manga_data['chapter_count']} 章)")
+
+    _update_loading(loading=False, progress=100, message="加载完成")
+    return {
+        "ok": True,
+        "manga": clean_manga_data(manga_data),
+        "progress": progress,
+    }
 
 
 # ==================== HTTP Handler ====================
@@ -915,16 +1155,16 @@ class MangaHandler(SimpleHTTPRequestHandler):
             self.serve_json({"ok": False, "error": str(e)})
 
     def handle_pick_folder(self):
-        """弹出 macOS 原生文件夹选择对话框"""
-        folder = pick_folder_macos()
+        """弹出系统原生文件夹选择对话框（macOS: osascript / Windows: tkinter）"""
+        folder = pick_folder_dialog()
         if not folder:
             self.serve_json({"ok": False, "error": "未选择文件夹"})
             return
         self._switch_manga(folder)
 
     def handle_pick_file(self):
-        """弹出 macOS 原生文件选择对话框（压缩包）"""
-        file_path = pick_file_macos()
+        """弹出系统原生文件选择对话框（压缩包）"""
+        file_path = pick_file_dialog()
         if not file_path:
             self.serve_json({"ok": False, "error": "未选择文件"})
             return
@@ -945,80 +1185,11 @@ class MangaHandler(SimpleHTTPRequestHandler):
             self.serve_json({"ok": False, "error": "路径为空"})
             return
 
-        folder = os.path.expanduser(folder)
-        folder = os.path.abspath(folder)
         self._switch_manga(folder)
 
     def _switch_manga(self, path):
         """切换到新的漫画（文件夹或压缩包）"""
-        is_file = os.path.isfile(path)
-        is_dir = os.path.isdir(path)
-
-        if not is_file and not is_dir:
-            _update_loading(loading=False)
-            self.serve_json({"ok": False, "error": f"路径不存在: {path}"})
-            return
-
-        if is_file and Path(path).suffix.lower() not in ARCHIVE_EXTENSIONS:
-            _update_loading(loading=False)
-            self.serve_json({"ok": False, "error": f"不支持的文件格式: {Path(path).suffix}"})
-            return
-
-        _update_loading(loading=True, progress=0, done=0, total=0,
-                       current="", message="正在扫描漫画目录...")
-        manga_data = scan_manga_folder(path)
-        if "error" in manga_data:
-            _update_loading(loading=False)
-            self.serve_json({"ok": False, "error": manga_data['error']})
-            return
-
-        if manga_data['chapter_count'] == 0:
-            _update_loading(loading=False)
-            self.serve_json({"ok": False, "error": "未找到漫画图片"})
-            return
-
-        # 更新全局状态
-        MangaHandler.manga_root = manga_data['root_path']
-        MangaHandler.manga_data = manga_data
-        MangaHandler.original_path = manga_data.get('original_path', path)
-
-        # 构建解压目录映射：虚拟路径前缀 → 解压后的临时目录
-        MangaHandler._chapter_virtual_dirs = {}
-        for ch in manga_data.get('chapters', []):
-            extracted_dir = ch.get('_extracted_dir')
-            if extracted_dir and ch.get('path', '').startswith('_arc_ch_'):
-                MangaHandler._chapter_virtual_dirs[ch['path']] = extracted_dir
-
-        # 写入历史记录（存原始路径）
-        history_path = manga_data.get('original_path', path)
-        add_to_history(history_path, manga_data['manga_name'])
-
-        # 自动加入书架
-        cover = self._get_first_cover(manga_data)
-        add_to_library(history_path, manga_data['manga_name'],
-                       manga_data['chapter_count'], cover)
-
-        # 获取阅读进度
-        progress = get_progress(manga_data['manga_name'])
-
-        print(f"📂 切换到: {path} ({manga_data['chapter_count']} 章)")
-
-        # 加载完成，重置进度
-        _update_loading(loading=False, progress=100, message="加载完成")
-
-        # 返回时去掉内部字段
-        clean_data = dict(manga_data)
-        clean_chapters = []
-        for ch in clean_data.get('chapters', []):
-            clean_ch = {k: v for k, v in ch.items() if not k.startswith('_')}
-            clean_chapters.append(clean_ch)
-        clean_data['chapters'] = clean_chapters
-
-        self.serve_json({
-            "ok": True,
-            "manga": clean_data,
-            "progress": progress,
-        })
+        self.serve_json(open_manga_path(path, record_history=True))
 
     def _get_first_cover(self, manga_data):
         """获取第一章第一张图的路径（用于封面）"""
@@ -1225,6 +1396,8 @@ class MangaHandler(SimpleHTTPRequestHandler):
             return
 
         relative_path = urllib.parse.unquote(relative_path)
+        # Windows 传来的路径可能带反斜杠或前导斜杠，统一成 POSIX 形式再解析
+        relative_path = relative_path.replace('\\', '/').lstrip('/')
 
         # 检查是否是压缩包章节的虚拟路径（_arc_ch_N/...）
         # 这些路径不在 manga_root 下，而是在对应的解压临时目录里
@@ -1317,7 +1490,7 @@ class MangaHandler(SimpleHTTPRequestHandler):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Mac 本地漫画阅读器')
+    parser = argparse.ArgumentParser(description='本地漫画阅读器（macOS / Windows / Linux）')
     parser.add_argument('manga_path', nargs='?', default=None,
                         help='漫画文件夹路径或压缩包路径（可选）')
     parser.add_argument('--port', type=int, default=8899, help='端口号 (默认 8899)')
@@ -1343,33 +1516,17 @@ def main():
             sys.exit(1)
 
         print(f"📂 扫描: {manga_path}")
-        manga_data = scan_manga_folder(manga_path)
+        result = open_manga_path(manga_path, record_history=True)
 
-        if "error" in manga_data:
-            print(f"❌ {manga_data['error']}")
+        if not result.get('ok'):
+            print(f"❌ {result.get('error')}")
             sys.exit(1)
 
-        MangaHandler.manga_root = manga_data['root_path']
-        MangaHandler.manga_data = manga_data
-        MangaHandler.original_path = manga_data.get('original_path', manga_path)
-
-        # 构建解压目录映射
-        MangaHandler._chapter_virtual_dirs = {}
-        for ch in manga_data.get('chapters', []):
-            extracted_dir = ch.get('_extracted_dir')
-            if extracted_dir and ch.get('path', '').startswith('_arc_ch_'):
-                MangaHandler._chapter_virtual_dirs[ch['path']] = extracted_dir
-
-        # 写入历史记录
-        history_path = manga_data.get('original_path', manga_path)
-        add_to_history(history_path, manga_data['manga_name'])
-
+        manga_data = result['manga']
         print(f"📖 漫画: {manga_data['manga_name']}")
         print(f"📚 共 {manga_data['chapter_count']} 个章节")
         for ch in manga_data['chapters']:
-            name = ch['name']
-            count = ch['image_count']
-            print(f"   ├─ {name} ({count} 页)")
+            print(f"   ├─ {ch['name']} ({ch['image_count']} 页)")
     else:
         print("📚 无参数启动 — 请在浏览器中选择漫画文件夹或压缩包")
         MangaHandler.manga_data = None
