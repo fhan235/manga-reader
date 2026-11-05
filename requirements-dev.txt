@@ -1,0 +1,4 @@
+# 打包依赖（PyInstaller 与图标生成）
+-r requirements.txt
+pyinstaller>=6.0
+pillow>=10.0

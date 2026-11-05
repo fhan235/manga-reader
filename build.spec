@@ -23,6 +23,8 @@ IS_MAC = sys.platform == 'darwin'
 ONEFILE = os.environ.get('MR_ONEFILE', '') in ('1', 'true', 'yes')
 # 想看到控制台日志（排查启动问题）时设 MR_CONSOLE=1
 CONSOLE = os.environ.get('MR_CONSOLE', '') in ('1', 'true', 'yes')
+# 版本号（CI 里由 tag 注入，本地默认 1.0.0）
+APP_VERSION = os.environ.get('APP_VERSION') or '1.0.0'
 
 datas = [
     # 前端 HTML
@@ -136,8 +138,8 @@ else:
             info_plist={
                 'CFBundleName': '漫画阅读器',
                 'CFBundleDisplayName': '漫画阅读器',
-                'CFBundleShortVersionString': '1.0.0',
-                'CFBundleVersion': '1.0.0',
+                'CFBundleShortVersionString': APP_VERSION,
+                'CFBundleVersion': APP_VERSION,
                 'NSHighResolutionCapable': True,
                 'LSMinimumSystemVersion': '10.15',
                 'NSAppleEventsUsageDescription': '漫画阅读器需要此权限来选择文件夹',

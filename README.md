@@ -116,11 +116,11 @@ manga-reader/
 # 仅命令行/浏览器模式（零额外依赖，使用 Python 标准库）
 # 无需安装任何包
 
-# 如需原生窗口模式
-pip install pywebview
+# 原生窗口模式（pywebview + rarfile）
+pip install -r requirements.txt
 
-# Windows 上打包/选文件夹还需要
-pip install pyinstaller rarfile pillow
+# 开发/打包依赖（含 PyInstaller、Pillow）
+pip install -r requirements-dev.txt
 ```
 
 ### 运行方式
@@ -172,11 +172,14 @@ python app.py "D:\漫画\火影忍者全彩版"   # 启动即打开指定目录
 ### Windows 打包
 
 ```powershell
-# 目录版（推荐，启动快）：dist\MangaReader\MangaReader.exe
+# 目录版（推荐，启动快）：dist\onedir\MangaReader\MangaReader.exe
 powershell -ExecutionPolicy Bypass -File .\build_win.ps1
 
-# 单文件版：dist\MangaReader.exe（约 40MB，首次启动稍慢）
+# 单文件版：dist\onefile\MangaReader.exe + 便携 zip
 powershell -ExecutionPolicy Bypass -File .\build_win.ps1 -OneFile
+
+# 顺便出 Inno Setup 安装包（需先装 Inno Setup 6）
+powershell -ExecutionPolicy Bypass -File .\build_win.ps1 -Installer
 
 # 想看控制台日志排查问题
 powershell -ExecutionPolicy Bypass -File .\build_win.ps1 -Console
