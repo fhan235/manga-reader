@@ -255,6 +255,52 @@ bash make_dmg.sh
 
 生成 `dist/漫画阅读器.dmg`，用户双击打开 DMG，将"漫画阅读器"拖入 Applications 即完成安装。
 
+### 步骤四：Windows 安装包（Inno Setup）
+
+```powershell
+# 1) 目录版打包（安装包的内容来源）
+$env:MR_ONEFILE='0'; pyinstaller --noconfirm --clean --distpath dist/onedir --workpath build/onedir build.spec
+
+# 2) 编译安装包（需先装 Inno Setup 6）
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" "/DAppVersion=1.0.0" "installer\MangaReader.iss"
+```
+
+产出 `dist/MangaReader-1.0.0-windows-x64-setup.exe`：带开始菜单 / 可选桌面快捷方式 / 卸载项，装到 `%LOCALAPPDATA%\Programs\MangaReader`（免管理员）。
+
+---
+
+## 🤖 GitHub Actions 自动构建
+
+`.github/workflows/build.yml` 会在云端把三端产物全打出来，本机不需要装任何打包环境。
+
+**触发条件**：push 到 `main` / `master`、任何 PR、手动 `Run workflow`、推 `v*` tag。
+
+| Job | 运行环境 | 产物 |
+|-----|----------|------|
+| `windows` | `windows-latest` | `MangaReader-<ver>-windows-x64-setup.exe`（Inno Setup 安装包）、`MangaReader-<ver>-windows-portable.zip`（单文件便携版） |
+| `macos` | `macos-14`（arm64） | `MangaReader-<ver>-macos-arm64.dmg`、`MangaReader-<ver>-macos-app.zip` |
+| `linux` | `ubuntu-24.04` | `MangaReader-<ver>-linux-x64.tar.gz` |
+| `release` | 打 tag 时 | 自动把上面所有产物挂到 GitHub Release |
+
+**怎么用**
+
+```bash
+# 1) 推上去，Actions 里能看到每个平台的 artifact（保留 90 天）
+git push origin main
+
+# 2) 想要正式发布：打个 tag 即可，Release 会自动创建并附带全部安装包
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+版本号取 tag 名（去掉前缀 `v`）；非 tag 构建用 `0.0.0-<commit>` 形式，避免混淆。
+
+**注意**
+
+- macOS 产物未签名 / 未公证（无 Apple 开发者证书），用户首次打开需右键 → 打开，或 `xattr -dr com.apple.quarantine "/Applications/漫画阅读器.app"`。
+- Windows 产物未做代码签名，SmartScreen 会提示"未知发布者"，点"更多信息 → 仍要运行"。
+- Actions 里的 macOS runner 是 arm64，Intel Mac 需要 Rosetta 或在 Intel runner 上重跑（把 `runs-on` 改成 `macos-13` 即可）。
+- Windows 安装包用 Inno Setup 6（runner 自带，缺失时 `choco install innosetup`）；`.iss` 是 UTF-8 BOM，改的时候别存成 GBK。
+
 ---
 
 ## 🔌 API 接口

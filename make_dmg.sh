@@ -47,6 +47,8 @@ MOUNT_DIR=$(hdiutil attach -readwrite -noverify "$DMG_TEMP" | grep "/Volumes/" |
 ln -s /Applications "$MOUNT_DIR/Applications"
 
 # 4. 设置 Finder 窗口样式（AppleScript）
+#    CI 环境没有可用的 Finder 会话，跳过美化但保留 Applications 软链接
+if [ -z "${CI:-}" ]; then
 echo "  → 设置窗口外观..."
 osascript <<EOF
 tell application "Finder"
@@ -70,6 +72,9 @@ tell application "Finder"
     end tell
 end tell
 EOF
+else
+    echo "  → CI 环境，跳过 Finder 美化"
+fi
 
 # 5. 设置权限
 chmod -Rf go-w "$MOUNT_DIR" 2>/dev/null || true

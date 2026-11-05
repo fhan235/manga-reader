@@ -1,0 +1,226 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: '3.11'
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  # ============ Windows: 单文件 exe + Inno Setup 安装包 ============
+  windows:
+    name: Windows (exe + installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 解析版本号
+        shell: bash
+        run: |
+          ref="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -n "$ref" ]; then
+            ver="${ref#v}"
+          else
+            ver="0.0.0-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "版本号: $ver"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pywebview pyinstaller rarfile pillow
+
+      - name: 生成 .ico 图标
+        run: |
+          python -c "from PIL import Image; Image.open('img.png').save('img.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: PyInstaller（目录版，供安装包使用）
+        env:
+          MR_ONEFILE: '0'
+          MR_CONSOLE: '0'
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m PyInstaller --noconfirm --clean --distpath dist/onedir --workpath build/onedir build.spec
+
+      - name: PyInstaller（单文件便携版）
+        env:
+          MR_ONEFILE: '1'
+          MR_CONSOLE: '0'
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m PyInstaller --noconfirm --clean --distpath dist/onefile --workpath build/onefile build.spec
+
+      - name: 打包便携 zip
+        shell: bash
+        run: |
+          cd dist/onefile
+          powershell -Command "Compress-Archive -Path MangaReader.exe -DestinationPath '../MangaReader-${APP_VERSION}-windows-portable.zip' -Force"
+
+      - name: 构建安装包（Inno Setup）
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            Write-Host ':: 未找到 ISCC，尝试安装 Inno Setup'
+            choco install innosetup -y --no-progress
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) { throw 'ISCC.exe 不存在，Inno Setup 安装失败' }
+          & $iscc "/DAppVersion=$env:APP_VERSION" "installer\MangaReader.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 失败，退出码 $LASTEXITCODE" }
+
+      - name: 列出产物
+        shell: bash
+        run: ls -lh dist/*.exe dist/*.zip || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/MangaReader-*-windows-x64-setup.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: dist/MangaReader-*-windows-portable.zip
+          if-no-files-found: error
+
+  # ============ macOS: .app + DMG ============
+  macos:
+    name: macOS (app + dmg)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 解析版本号
+        shell: bash
+        run: |
+          ref="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -n "$ref" ]; then
+            ver="${ref#v}"
+          else
+            ver="0.0.0-$(echo "${GITHUB_SHA}" | cut -c1-7)"
+          fi
+          echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
+          echo "版本号: $ver"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pywebview pyinstaller rarfile pillow
+
+      - name: PyInstaller 打包 .app
+        env:
+          MR_CONSOLE: '0'
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m PyInstaller --noconfirm --clean build.spec
+          ls -la dist
+
+      - name: 制作 DMG
+        env:
+          CI: '1'
+        run: |
+          bash make_dmg.sh
+          mv "dist/漫画阅读器.dmg" "dist/MangaReader-${APP_VERSION}-macos-$(uname -m).dmg"
+          ls -lh dist/*.dmg
+
+      - name: 压缩 .app（免安装备份）
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "漫画阅读器.app" "MangaReader-${APP_VERSION}-macos-app.zip"
+          ls -lh *.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: dist/*-macos-app.zip
+          if-no-files-found: error
+
+  # ============ Linux: 目录版 tar.gz（浏览器/窗口模式均可） ============
+  linux:
+    name: Linux (tar.gz)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-gi gir1.2-webkit2-4.1 libgtk-3-0 || true
+          python -m pip install --upgrade pip
+          python -m pip install pywebview pyinstaller rarfile pillow
+
+      - name: 解析版本号
+        run: |
+          ref="${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if [ -n "$ref" ]; then ver="${ref#v}"; else ver="0.0.0-$(echo "${GITHUB_SHA}" | cut -c1-7)"; fi
+          echo "APP_VERSION=$ver" >> "$GITHUB_ENV"
+
+      - name: PyInstaller 打包
+        env:
+          MR_CONSOLE: '0'
+          PYTHONIOENCODING: utf-8
+        run: |
+          python -m PyInstaller --noconfirm --clean build.spec
+          tar -C dist -czf "dist/MangaReader-${APP_VERSION}-linux-x64.tar.gz" MangaReader
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: dist/*-linux-x64.tar.gz
+          if-no-files-found: error
+
+  # ============ 打 tag 时自动发布 Release ============
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 汇总产物
+        run: |
+          find artifacts -type f | sort
+          mkdir -p release
+          find artifacts -type f \( -name '*.exe' -o -name '*.zip' -o -name '*.dmg' -o -name '*.tar.gz' \) -exec cp {} release/ \;
+          ls -lh release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
+          fail_on_unmatched_files: false
